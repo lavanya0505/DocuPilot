@@ -303,9 +303,8 @@ sudo apt install tesseract-ocr tesseract-ocr-eng
 ### 1. Clone and start the infrastructure
 
 ```bash
-git clone https://github.com/dhanoliya-ji/DocMinds.git
-cd DocMinds/backend
-
+git clone https://github.com/lavanya0505/DocuPilot.git
+cd DocuPilot/backend
 # Starts PostgreSQL (with pgvector) on 5433 and Redis on 6379
 docker compose up -d
 ```
