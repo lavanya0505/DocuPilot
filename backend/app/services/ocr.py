@@ -1,0 +1,291 @@
+"""
+ocr.py
+======
+WHAT THIS FILE DOES
+-------------------
+OCR stands for Optical Character Recognition. In plain terms:
+
+    "Here is a PICTURE of some text. Tell me what the letters say."
+
+This is what makes scanned documents searchable. A scanned contract is not a
+document as far as a computer is concerned -- it is a photograph. There is no
+text inside it to extract, only coloured pixels. OCR looks at those pixels and
+works out which letters they form.
+
+WHEN THIS RUNS
+--------------
+Two situations, both triggered from extractor.py:
+
+  1. An image file was uploaded (.png, .jpg, ...). There is nothing but pixels,
+     so OCR is the only option.
+
+  2. A PDF turned out to be a scan. extractor.py measures the text it got back
+     and, if a PDF averages fewer than 100 characters per page, concludes there
+     is no text layer and calls `ocr_pdf` instead.
+
+HOW A PDF PAGE BECOMES AN IMAGE
+-------------------------------
+OCR engines read images, not PDFs. So each page is RASTERISED first -- drawn
+into a bitmap, exactly as it would look on screen -- and that bitmap is handed
+to the OCR engine.
+
+The resolution matters. Too low and the letters blur into each other and OCR
+guesses wrong; too high and it is slow and memory-hungry for no extra accuracy.
+150 DPI is the usual sweet spot for printed text.
+
+THE PROVIDER PATTERN, AND WHY THERE IS A MOCK
+---------------------------------------------
+Three real engines are supported (Tesseract, EasyOCR, PaddleOCR), chosen by the
+`OCR_PROVIDER` setting, plus a mock.
+
+Every one of them falls back to the mock rather than raising. That is
+deliberate: Tesseract is a SEPARATE PROGRAM that must be installed on the
+operating system -- it is not a Python package, so `pip install` does not
+provide it. Without the fallback, anyone cloning this repository without
+Tesseract would see their uploads fail with a confusing crash. Instead the
+pipeline completes, the document is still chunked and embedded, and the log
+says plainly what is missing.
+"""
+
+import io
+from typing import Tuple
+
+import fitz  # PyMuPDF
+from PIL import Image
+
+from app.core.config import settings
+
+
+class OCRService:
+    """Reads text out of images and scanned pages."""
+
+    # ==================================================================
+    # PDF -> IMAGES -> TEXT
+    # ==================================================================
+
+    @classmethod
+    def ocr_pdf(cls, file_path: str) -> Tuple[str, int]:
+        """
+        Rasterise every page of a PDF and run OCR on each one.
+
+        Returns a tuple of (combined text, page count).
+
+        Each page's text is prefixed with a marker:
+
+            --- PAGE 1 (OCR) ---
+
+        That marker is NOT decoration. chunker.py splits on exactly this
+        pattern, which is how a chunk produced from a scanned page still knows
+        its page number -- and therefore how a citation for a scanned document
+        can say "page 7".
+        """
+        document = fitz.open(file_path)
+        pages_text = []
+
+        try:
+            # `enumerate(..., 1)` because page numbering starts at 1 for humans.
+            for page_number, page in enumerate(document, 1):
+                # Draw the page into a bitmap at the configured resolution.
+                # `get_pixmap` is PyMuPDF's renderer -- the same one that draws
+                # a PDF on screen.
+                pixmap = page.get_pixmap(dpi=settings.OCR_DPI)
+
+                # Convert to PNG bytes in memory. Nothing touches the disk,
+                # which is both faster and avoids leaving temp files behind.
+                image_bytes = pixmap.tobytes("png")
+
+                page_text = cls.ocr_image(image_bytes)
+                pages_text.append(f"--- PAGE {page_number} (OCR) ---\n{page_text}")
+
+            page_count = len(document)
+        finally:
+            # Always release the file handle, even if OCR throws part way. On
+            # Windows an open handle keeps the file locked so it cannot be
+            # deleted or re-processed.
+            document.close()
+
+        return "\n\n".join(pages_text), page_count
+
+    # ==================================================================
+    # THE DISPATCHER
+    # ==================================================================
+
+    @classmethod
+    def ocr_image(cls, image_bytes: bytes) -> str:
+        """
+        Run OCR on one image, using whichever engine is configured.
+
+        Takes raw bytes rather than a file path so the same method serves both
+        an uploaded image file and a PDF page rasterised in memory.
+        """
+        provider = settings.OCR_PROVIDER.lower()
+
+        if provider == "tesseract":
+            return cls._ocr_tesseract(image_bytes)
+        elif provider == "easyocr":
+            return cls._ocr_easyocr(image_bytes)
+        elif provider == "paddleocr":
+            return cls._ocr_paddleocr(image_bytes)
+        elif provider == "mock":
+            return cls._ocr_mock(image_bytes)
+        else:
+            print(f"[OCR] Unknown provider '{provider}'. Falling back to mock OCR.")
+            return cls._ocr_mock(image_bytes)
+
+    # ==================================================================
+    # ENGINE 1: TESSERACT  -- the default
+    # ==================================================================
+
+    @classmethod
+    def _ocr_tesseract(cls, image_bytes: bytes) -> str:
+        """
+        Google's Tesseract: the most widely used open-source OCR engine.
+
+        IMPORTANT: `pytesseract` is only a thin Python WRAPPER. It shells out to
+        the actual `tesseract` program, which must be installed separately at
+        the operating system level:
+
+            macOS         brew install tesseract
+            Ubuntu        sudo apt install tesseract-ocr tesseract-ocr-eng
+            Windows       https://github.com/UB-Mannheim/tesseract/wiki
+                          then set TESSERACT_CMD in .env to the full .exe path
+
+        The project's Dockerfile installs it automatically, which is why OCR
+        works in the deployed container without any manual step.
+        """
+        try:
+            # Imported inside the function so the module still loads on a
+            # machine where pytesseract is not installed at all.
+            import pytesseract
+
+            # On Windows the binary is rarely on the PATH, so the full path has
+            # to be supplied. The default value is the bare command name, so a
+            # difference means the user configured something explicit.
+            if settings.TESSERACT_CMD != "tesseract":
+                pytesseract.pytesseract.tesseract_cmd = settings.TESSERACT_CMD
+
+            # `io.BytesIO` wraps the bytes so Pillow can open them as if they
+            # were a file.
+            image = Image.open(io.BytesIO(image_bytes))
+            return pytesseract.image_to_string(image)
+
+        except Exception as exc:
+            # Usually "tesseract is not installed or it's not in your PATH".
+            # We degrade to mock rather than failing the whole ingestion.
+            print(
+                f"[OCR] Tesseract failed or is not installed: {exc}. "
+                f"Falling back to mock OCR."
+            )
+            return cls._ocr_mock(image_bytes)
+
+    # ==================================================================
+    # ENGINE 2: EASYOCR
+    # ==================================================================
+
+    @classmethod
+    def _ocr_easyocr(cls, image_bytes: bytes) -> str:
+        """
+        A pure-Python, deep-learning OCR engine.
+
+        More accurate than Tesseract on messy real-world images -- photographs,
+        skewed scans, unusual fonts -- but much heavier: it pulls in PyTorch and
+        downloads model weights on first use.
+        """
+        try:
+            import easyocr
+
+            # `Reader(['en'])` loads the English models. Constructed here rather
+            # than at import time so nothing is loaded unless this engine is
+            # actually selected.
+            reader = easyocr.Reader(["en"])
+
+            # `detail=0` returns just the strings. The default returns bounding
+            # boxes and confidence scores too, which we do not need.
+            results = reader.readtext(image_bytes, detail=0)
+            return "\n".join(results)
+
+        except ImportError:
+            print("[OCR] easyocr is not installed. Falling back to mock OCR.")
+            return cls._ocr_mock(image_bytes)
+        except Exception as exc:
+            print(f"[OCR] EasyOCR failed: {exc}. Falling back to mock OCR.")
+            return cls._ocr_mock(image_bytes)
+
+    # ==================================================================
+    # ENGINE 3: PADDLEOCR
+    # ==================================================================
+
+    @classmethod
+    def _ocr_paddleocr(cls, image_bytes: bytes) -> str:
+        """
+        Baidu's OCR engine. Particularly strong on dense documents, tables and
+        non-Latin scripts.
+        """
+        try:
+            from paddleocr import PaddleOCR
+
+            # `use_angle_cls=True` first detects and corrects the rotation of
+            # each text line, which matters for pages scanned slightly crooked.
+            engine = PaddleOCR(use_angle_cls=True, lang="en", show_log=False)
+
+            # PaddleOCR wants a numpy array rather than raw bytes, so we open
+            # the image with Pillow and convert.
+            import numpy as np
+
+            image = Image.open(io.BytesIO(image_bytes))
+            image_array = np.array(image)
+
+            result = engine.ocr(image_array, cls=True)
+
+            # The result is nested: a list of pages, each a list of detections,
+            # each detection being (bounding_box, (text, confidence)). We want
+            # only the text, so `res[1][0]`.
+            texts = []
+            for page_result in result:
+                if page_result:
+                    for detection in page_result:
+                        texts.append(detection[1][0])
+
+            return "\n".join(texts)
+
+        except ImportError:
+            print("[OCR] paddleocr is not installed. Falling back to mock OCR.")
+            return cls._ocr_mock(image_bytes)
+        except Exception as exc:
+            print(f"[OCR] PaddleOCR failed: {exc}. Falling back to mock OCR.")
+            return cls._ocr_mock(image_bytes)
+
+    # ==================================================================
+    # THE MOCK  -- so the pipeline never breaks on a missing dependency
+    # ==================================================================
+
+    @classmethod
+    def _ocr_mock(cls, image_bytes: bytes) -> str:
+        """
+        Return placeholder text describing the image, without doing real OCR.
+
+        This exists so that someone cloning the repository WITHOUT Tesseract
+        installed still sees the complete pipeline work: the document is
+        detected as a scan, "OCR" runs, chunks are produced, embeddings are
+        stored and search returns results. Only the words themselves are
+        placeholders.
+
+        The alternative -- crashing -- would make it look as though the
+        application were broken, when in fact one optional system package is
+        simply absent.
+        """
+        try:
+            image = Image.open(io.BytesIO(image_bytes))
+            width, height = image.size
+        except Exception:
+            width, height = 0, 0
+
+        return (
+            f"[OCR Mock Results]\n"
+            f"Detected Image layout size: {width}x{height} pixels.\n"
+            f"Parsed content: ACME CORPORATION CONFIDENTIAL INGESTION WORKSPACE.\n"
+            f"Paragraph 1: Optical Character Recognition ran using "
+            f"{settings.OCR_PROVIDER.upper()}.\n"
+            f"Paragraph 2: This is placeholder text. Install Tesseract to "
+            f"extract the real contents of scanned pages."
+        )

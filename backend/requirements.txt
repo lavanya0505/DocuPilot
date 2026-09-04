@@ -1,0 +1,102 @@
+# ======================================================================
+# PYTHON DEPENDENCIES
+# ======================================================================
+# Install everything with:   pip install -r requirements.txt
+#
+# Every version is PINNED with `==` rather than left open. This means everyone
+# who installs this project gets byte-for-byte the same library versions, so
+# code that works on your laptop cannot mysteriously break on the server
+# because a dependency shipped a new release overnight.
+# ======================================================================
+
+# ---- WEB FRAMEWORK ---------------------------------------------------
+# fastapi  : the framework itself -- routing, validation, auto-generated docs.
+# uvicorn  : the ASGI server that actually listens on a port and runs FastAPI.
+#            FastAPI defines WHAT happens; uvicorn is what runs it.
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+
+# `python-multipart` is required for file uploads. Without it, FastAPI cannot
+# parse the multipart/form-data encoding a browser uses to send files, and the
+# upload endpoint fails at import time with a clear error.
+python-multipart==0.0.9
+
+# ---- CONFIGURATION AND VALIDATION -----------------------------------
+# pydantic          : validates and converts data (all our schemas).
+# pydantic-settings : reads settings from environment variables and .env.
+# python-dotenv     : the underlying .env file parser.
+pydantic==2.7.4
+pydantic-settings==2.3.4
+python-dotenv==1.0.1
+
+# ---- DATABASE --------------------------------------------------------
+# sqlalchemy      : the ORM -- write Python objects instead of raw SQL.
+# asyncpg         : the ASYNC Postgres driver, used by the FastAPI app.
+# psycopg2-binary : the SYNC Postgres driver, needed by Alembic migrations.
+# alembic         : applies versioned schema changes to the database.
+# pgvector        : adds the `Vector` column type and distance operators.
+sqlalchemy[asyncio]==2.0.31
+asyncpg==0.29.0
+psycopg2-binary==2.9.9
+alembic==1.13.2
+pgvector==0.3.1
+
+# ---- AUTHENTICATION AND SECURITY -------------------------------------
+# python-jose : creates and verifies the signed JWT login tokens.
+# passlib     : the password hashing framework.
+# bcrypt      : the actual hashing algorithm. It is deliberately SLOW, which is
+#               what makes brute-forcing a stolen password database impractical.
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+bcrypt==4.1.3
+
+# ---- BACKGROUND JOBS -------------------------------------------------
+# celery : runs slow work (document processing) outside the web request, so the
+#          user gets an instant response instead of waiting 30 seconds.
+# redis  : the message queue Celery uses to pass jobs to its workers.
+celery==5.4.0
+redis==5.0.4
+
+# ---- DOCUMENT PARSING (one library per format family) ----------------
+# pymupdf        : PDF -- text, page count, metadata, and page rasterisation.
+# python-docx    : Word .docx -- paragraphs AND tables.
+# python-pptx    : PowerPoint .pptx -- text from every shape on every slide.
+# openpyxl       : Excel .xlsx/.xls -- cell values, sheet by sheet.
+# beautifulsoup4 : HTML -- strips tags and returns the readable text.
+# langdetect     : identifies which human language a document is written in.
+# (.eml, .csv, .zip and .txt are handled by Python's own standard library.)
+pymupdf==1.24.5
+python-docx==1.1.2
+python-pptx==0.6.23
+openpyxl==3.1.2
+beautifulsoup4==4.12.3
+langdetect==1.0.9
+
+# ---- OCR (reading text out of scanned pages and images) --------------
+# pytesseract : a thin Python wrapper around the Tesseract OCR program.
+#               NOTE: the Tesseract PROGRAM must also be installed separately --
+#               it is not a Python package. See the README for instructions.
+# pillow      : image loading and manipulation, which pytesseract needs.
+pytesseract==0.3.10
+pillow==10.3.0
+
+# ---- AI: EMBEDDINGS AND TEXT GENERATION ------------------------------
+# tiktoken : counts tokens exactly the way the models do, so our chunks are
+#            genuinely 500 tokens rather than 500 characters.
+tiktoken==0.7.0
+
+# sentence-transformers : runs the embedding model LOCALLY on this server.
+#            This is our default provider: free, no API key, works offline, and
+#            document text never leaves the machine.
+#            It pulls in PyTorch, which is why installation is a large download.
+sentence-transformers==3.0.1
+
+# groq : client for Groq's API, which serves Llama 3.3 70B and writes the final
+#            answers. Free tier, no credit card.
+#            >>> Get your key at https://console.groq.com/keys and put it in
+#            >>> backend/.env as   GROQ_API_KEY=gsk_...
+groq==0.9.0
+
+# openai : OPTIONAL. Only needed if you set EMBEDDING_PROVIDER=openai to use
+#            paid OpenAI embeddings instead of the free local model.
+openai==1.30.1

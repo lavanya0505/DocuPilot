@@ -1,0 +1,96 @@
+"""
+celery_app.py
+=============
+WHAT THIS FILE DOES
+-------------------
+Configures Celery -- the system that runs slow work OUTSIDE the web request.
+
+THE PROBLEM IT SOLVES
+---------------------
+Processing a 200-page scanned PDF takes minutes: rasterise every page, OCR it,
+chunk it, embed it. If that ran inside the upload request, the user's browser
+would sit on a spinner and eventually time out.
+
+So instead:
+
+    1. The upload endpoint saves the file and writes a Document row with
+       status "pending".
+    2. It calls `process_document_task.delay(document_id)`, which does NOT run
+       the function -- it drops a small message onto Redis and returns instantly.
+    3. The API responds to the browser in milliseconds.
+    4. A separate WORKER process, possibly on another machine entirely, picks
+       that message up and does the real work.
+    5. The frontend polls the document's status until it reads "completed".
+
+THE THREE PIECES
+----------------
+    BROKER   Redis. The queue that holds pending jobs.
+    WORKER   A separate process you start yourself:
+                 celery -A app.core.celery_app.celery_app worker --loglevel=info
+             (add --pool=solo on Windows -- Windows has no fork())
+    BACKEND  Where results and statuses are stored. Also Redis here.
+
+Broker and backend are different roles: the broker carries work TO the worker,
+the backend carries answers BACK. They happen to use the same Redis server,
+which is normal for a project this size.
+"""
+
+from celery import Celery
+
+from app.core.config import settings
+
+# ----------------------------------------------------------------------
+# CREATE THE CELERY APPLICATION
+# ----------------------------------------------------------------------
+celery_app = Celery(
+    # A label for this app, shown in logs and monitoring tools.
+    "document_intelligence_tasks",
+    # Where jobs are QUEUED.
+    broker=settings.REDIS_URL,
+    # Where results and statuses are STORED, so /tasks/status/{id} can report
+    # whether a job succeeded.
+    backend=settings.REDIS_URL,
+)
+
+# ----------------------------------------------------------------------
+# CONFIGURATION
+# ----------------------------------------------------------------------
+celery_app.conf.update(
+    # Report a task as STARTED the moment a worker picks it up. Without this,
+    # a task sits in PENDING right up until it finishes, so the UI cannot tell
+    # "queued behind other work" apart from "actively being processed".
+    task_track_started=True,
+
+    # ---- Serialisation ----
+    # JSON rather than Python's `pickle`. This is a security decision, not a
+    # preference: pickle can execute arbitrary code when it deserialises, so
+    # anyone able to write to the queue could run code on your worker. JSON
+    # can only ever describe data.
+    task_serializer="json",
+    result_serializer="json",
+    accept_content=["json"],
+
+    # ---- Time ----
+    # Always work in UTC internally. Servers, developers and users sit in
+    # different time zones; storing anything else guarantees confusion, and
+    # breaks twice a year when clocks change.
+    timezone="UTC",
+    enable_utc=True,
+
+    # ---- Housekeeping ----
+    # Discard stored results after 1 day (86400 seconds). Without an expiry,
+    # every task result accumulates in Redis forever and slowly consumes all
+    # its memory.
+    result_expires=86400,
+
+    # Explicitly import the tasks package on worker start-up. A task the worker
+    # has never imported is not registered, and any job for it fails with
+    # "Received unregistered task" -- a genuinely confusing error, because the
+    # code plainly exists.
+    imports=("app.tasks",),
+)
+
+# A second safety net: scan the `app` package for anything decorated with
+# `@celery_app.task`. Between this and `imports` above, a newly added task is
+# picked up without further configuration.
+celery_app.autodiscover_tasks(["app"])

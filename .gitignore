@@ -1,0 +1,55 @@
+# ======================================================================
+#  Files git must NEVER track.
+#  The most important entry here is `.env` - it holds your API keys and
+#  database password. `.env.example` IS committed, as a template.
+# ======================================================================
+
+# ---- Secrets and local environment ----
+.env
+.env.local
+.env.*.local
+!.env.example
+!.env.local.example
+
+# ---- Python virtual environments ----
+.venv/
+venv/
+env/
+ENV/
+
+# ---- Python build artefacts ----
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- Uploaded documents ----
+# User content, often large and sometimes confidential. The folder itself is
+# kept (via .gitkeep) so the app has somewhere to write on a fresh clone.
+uploads/*
+!uploads/.gitkeep
+backend/uploads/*
+!backend/uploads/.gitkeep
+
+# ---- Node / Next.js ----
+node_modules/
+.next/
+out/
+build/
+.vercel
+
+# ---- Editors and OS noise ----
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ---- Logs ----
+*.log
+npm-debug.log*
+yarn-error.log*

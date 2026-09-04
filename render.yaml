@@ -1,0 +1,184 @@
+# ======================================================================
+#  RENDER BLUEPRINT  --  Infrastructure as Code
+# ======================================================================
+#  This one file describes the ENTIRE cloud deployment: the API, the
+#  background worker, the database and the queue. Render reads it and
+#  creates everything for you.
+#
+#  WHY THIS INSTEAD OF CLICKING THROUGH A DASHBOARD?
+#  The deployment becomes reproducible and reviewable. It lives in git next
+#  to the code, so anyone can see exactly how production is configured, and
+#  the whole stack can be recreated from scratch by pointing Render at this
+#  repository again.
+#
+#  HOW TO DEPLOY
+#  -------------
+#   1. Push this repository to GitHub.
+#   2. Go to  https://dashboard.render.com/blueprints  and click
+#      "New Blueprint Instance".
+#   3. Select this repository. Render finds this file automatically.
+#   4. It will prompt for GROQ_API_KEY -- paste your free key from
+#      https://console.groq.com/keys
+#   5. Click Apply. First build takes 10-15 minutes, mostly spent
+#      installing PyTorch and baking in the embedding model.
+#
+#  NOTE ON THE FREE TIER
+#  Free web services SLEEP after 15 minutes with no traffic, so the first
+#  request after an idle period takes ~50 seconds to wake the container.
+#  Free Postgres instances expire after 90 days and must be recreated.
+# ======================================================================
+
+databases:
+  # ---- PostgreSQL with the pgvector extension ----------------------
+  # Render's Postgres 16 ships pgvector, which our migration enables with
+  # `CREATE EXTENSION IF NOT EXISTS vector`. Without pgvector there is no
+  # vector column and no semantic search at all.
+  - name: docminds-db
+    databaseName: document_intelligence
+    user: docminds
+    plan: free
+    postgresMajorVersion: "16"
+
+services:
+  # ==================================================================
+  # 1. REDIS  --  the queue Celery uses to hand jobs to the worker
+  # ==================================================================
+  - type: redis
+    name: docminds-redis
+    plan: free
+    # Only our own services may connect. An open Redis on the public
+    # internet is compromised within minutes.
+    ipAllowList: []
+    # When memory fills up, evict the least recently used keys rather than
+    # rejecting new writes, so the queue keeps functioning under pressure.
+    maxmemoryPolicy: allkeys-lru
+
+  # ==================================================================
+  # 2. THE API  --  what the browser talks to
+  # ==================================================================
+  - type: web
+    name: docminds-api
+    runtime: docker
+    plan: free
+    # Where the Dockerfile lives, and which directory is treated as the
+    # build context (everything the Dockerfile can COPY from).
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+
+    # Render polls this URL to decide whether the service is healthy. If it
+    # stops responding, the deploy is rolled back rather than going live broken.
+    healthCheckPath: /api/v1/health
+
+    envVars:
+      # ---- Wiring to the other services ----
+      # `fromDatabase` and `fromService` inject the real connection strings
+      # at deploy time. Nothing is hard-coded, and no credentials are ever
+      # committed to this file.
+      - key: DATABASE_URL
+        fromDatabase:
+          name: docminds-db
+          property: connectionString
+
+      - key: REDIS_URL_OVERRIDE
+        fromService:
+          type: redis
+          name: docminds-redis
+          property: connectionString
+
+      # ---- Secrets ----
+      # `generateValue: true` makes Render invent a strong random value and
+      # keep it secret. Exactly right for a JWT signing key: nobody, not even
+      # us, needs to know it.
+      - key: SECRET_KEY
+        generateValue: true
+
+      # `sync: false` means "prompt me for this in the dashboard and do not
+      # store it in the repository". This is how the Groq key stays private.
+      - key: GROQ_API_KEY
+        sync: false
+
+      # ---- Application configuration ----
+      - key: ENV
+        value: production
+      - key: DEBUG
+        value: "false"
+      - key: LLM_PROVIDER
+        value: groq
+      - key: GROQ_MODEL
+        value: llama-3.3-70b-versatile
+
+      # Embeddings run locally in the container: no API key, no per-request
+      # cost, and document text never leaves the host.
+      - key: EMBEDDING_PROVIDER
+        value: local
+      - key: EMBEDDING_DIMENSION
+        value: "384"
+      # A smaller batch size than the local default, because the free tier
+      # has limited RAM and a large batch can trigger an out-of-memory kill.
+      - key: EMBEDDING_BATCH_SIZE
+        value: "16"
+
+      - key: RETRIEVAL_TOP_K
+        value: "5"
+      - key: RETRIEVAL_MIN_SCORE
+        value: "0.15"
+
+      - key: OCR_PROVIDER
+        value: tesseract
+      # Installed into the image by the Dockerfile's apt-get step.
+      - key: TESSERACT_CMD
+        value: tesseract
+
+      # >>> AFTER DEPLOYING THE FRONTEND, SET THIS <<<
+      # Paste the Vercel URL here, otherwise the browser blocks every request
+      # from the frontend with a CORS error.
+      - key: FRONTEND_ORIGIN
+        sync: false
+
+  # ==================================================================
+  # 3. THE CELERY WORKER  --  processes documents in the background
+  # ==================================================================
+  # A SEPARATE service from the API, deliberately. Document processing is
+  # slow and CPU-hungry; running it in the web service would make the API
+  # unresponsive while a large PDF was being OCR'd. Splitting them also
+  # means each can be scaled independently.
+  - type: worker
+    name: docminds-worker
+    runtime: docker
+    plan: free
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+
+    # Override the Dockerfile's CMD: this service runs Celery, not uvicorn.
+    # `--concurrency=2` limits it to two documents at once, which fits the
+    # free tier's memory budget.
+    dockerCommand: celery -A app.core.celery_app.celery_app worker --loglevel=info --concurrency=2
+
+    envVars:
+      # The worker needs the same database and queue as the API. It writes
+      # the chunks and embeddings that the API later reads.
+      - key: DATABASE_URL
+        fromDatabase:
+          name: docminds-db
+          property: connectionString
+
+      - key: REDIS_URL_OVERRIDE
+        fromService:
+          type: redis
+          name: docminds-redis
+          property: connectionString
+
+      - key: ENV
+        value: production
+      - key: DEBUG
+        value: "false"
+      - key: EMBEDDING_PROVIDER
+        value: local
+      - key: EMBEDDING_DIMENSION
+        value: "384"
+      - key: EMBEDDING_BATCH_SIZE
+        value: "16"
+      - key: OCR_PROVIDER
+        value: tesseract
+      - key: TESSERACT_CMD
+        value: tesseract
