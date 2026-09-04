@@ -1,6 +1,6 @@
 <div align="center">
 
-# DocMinds
+# DocPilot
 
 **Upload documents in 19 formats. Ask questions in plain English. Get answers that cite the exact page.**
 
